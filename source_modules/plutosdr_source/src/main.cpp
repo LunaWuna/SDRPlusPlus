@@ -10,6 +10,7 @@
 #include <utils/optionlist.h>
 #include <algorithm>
 #include <regex>
+#include <cstring>  // for strncpy
 
 #define CONCAT(a, b) ((std::string(a) + b).c_str())
 
@@ -53,20 +54,16 @@ public:
         gainModes.define("slow_attack", "Slow Attack", "slow_attack");
         gainModes.define("hybrid", "Hybrid", "hybrid");
 
-
         rfinputselect.define("rx1", "Rx1", "rx1");
         rfinputselect.define("rx2", "Rx2", "rx2");
 
         iqmodeselect.define("cs16", "CS16", "cs16");
         iqmodeselect.define("cs8", "CS8", "cs8");
 
-
-        
-
         // Enumerate devices
         refresh();
 
-        // Select device
+        // Select device (and load device-specific config)
         config.acquire();
         devDesc = config.conf["device"];
         config.release();
@@ -185,7 +182,7 @@ private:
             }
 
             // Construct the device name
-            //std::string devName = '(' + backend + ") " + model + " [" + serial + ']';
+            // std::string devName = '(' + backend + ") " + model + " [" + serial + ']';
             std::string devName = desc;
 
             // Save device
@@ -216,19 +213,17 @@ private:
             select(devices.key(0));
         }
 
-        // Update URI
+        // Update URI from the selected device (default from device enumeration)
         devDesc = desc;
         uri = devices.value(devices.keyId(desc));
-
-        // TODO: Enumerate capabilities
 
         // Load defaults
         samplerate = 4000000;
         bandwidth = 0;
         gmId = 0;
         gain = -1.0f;
-        rfId=0;
-        iqmodeId=0;
+        rfId = 0;
+        iqmodeId = 0;
 
         // Load device config
         config.acquire();
@@ -253,8 +248,8 @@ private:
             gain = std::clamp<int>(gain, -1.0f, 73.0f);
         }
         
-         if (config.conf["devices"][devDesc].contains("rfselect")) {
-            // Select given gain mode or default if invalid
+        if (config.conf["devices"][devDesc].contains("rfselect")) {
+            // Select given rf input or default if invalid
             std::string rf = config.conf["devices"][devDesc]["rfselect"];
             if (rfinputselect.keyExists(rf)) {
                 rfId = rfinputselect.keyId(rf);
@@ -263,7 +258,10 @@ private:
                 rfId = 0;
             }
         }
-        
+        // Load custom URI if present in device config
+        if (config.conf["devices"][devDesc].contains("uri")) {
+            uri = config.conf["devices"][devDesc]["uri"];
+        }
         config.release();
 
         // Update samplerate ID
@@ -300,11 +298,8 @@ private:
         PlutoSDRSourceModule* _this = (PlutoSDRSourceModule*)ctx;
         if (_this->running) { return; }
 
-        // If no device is selected, give up
-        if (_this->devDesc.empty() || _this->uri.empty()) {
-             uri = "ip:libresdr.local";
-             flog::error("set ip:libresdr.local");
-        }
+        // If no device is selected or URI is empty, use default URI.
+        if (_this->devDesc.empty() || _this->uri.empty()) { return; }
 
         // Open context
         _this->ctx = iio_create_context_from_uri(_this->uri.c_str());
@@ -417,6 +412,22 @@ private:
         }
         if (_this->running) { SmGui::EndDisabled(); }
 
+        // --- New: URI Configuration Field ---
+        SmGui::LeftLabel("URI");
+        SmGui::FillWidth();
+        char uriBuffer[256];
+        // Copy the current URI into a local buffer
+        strncpy(uriBuffer, _this->uri.c_str(), sizeof(uriBuffer));
+        uriBuffer[sizeof(uriBuffer)-1] = '\\0'; // Ensure null termination
+        if (SmGui::InputText(CONCAT("##_pluto_uri_", _this->name), uriBuffer, sizeof(uriBuffer))) {
+            _this->uri = std::string(uriBuffer);
+            if (!_this->devDesc.empty()) {
+                config.acquire();
+                config.conf["devices"][_this->devDesc]["uri"] = _this->uri;
+                config.release(true);
+            }
+        }
+
         SmGui::LeftLabel("Bandwidth");
         SmGui::FillWidth();
         if (SmGui::Combo(CONCAT("##_pluto_bw_", _this->name), &_this->bwId, _this->bandwidths.txt)) {
@@ -465,20 +476,18 @@ private:
         SmGui::ForceSync();
         if (SmGui::Combo(CONCAT("##_pluto_rfinput_select_", _this->name), &_this->rfId, _this->rfinputselect.txt)) {
             if (_this->running) {
-                 uint32_t val = 0;
-         
-         iio_device_reg_read(_this->phy, 0x00000003, &val);
-         val = (val &0x3F)| ((_this->rfId+1)<<6);
-         iio_device_reg_write(_this->phy, 0x00000003, val);
-         
-         iio_device_debug_attr_write_longlong(_this->phy,"adi,1rx-1tx-mode-use-rx-num",_this->rfId+1);
-         // WorkAround because ad9361 driver doesnt reflect well rx change with gain
-         //iio_channel_attr_write(iio_device_find_channel(_this->phy, "voltage0", false), "gain_control_mode", "fast_attack");
+                uint32_t val = 0;
+                iio_device_reg_read(_this->phy, 0x00000003, &val);
+                val = (val & 0x3F) | ((_this->rfId + 1) << 6);
+                iio_device_reg_write(_this->phy, 0x00000003, val);
+                
+                iio_device_debug_attr_write_longlong(_this->phy, "adi,1rx-1tx-mode-use-rx-num", _this->rfId + 1);
+                // WorkAround because ad9361 driver doesnt reflect well rx change with gain
+                // iio_channel_attr_write(iio_device_find_channel(_this->phy, \"voltage0\", false), \"gain_control_mode\", \"fast_attack\"); 
             }
             if (!_this->devDesc.empty()) {
                 config.acquire();
                 config.conf["devices"][_this->devDesc]["rfinput"] = _this->rfinputselect.key(_this->rfId);
-                //config.conf["devices"][_this->devDesc]["rfinputselect"] = _this->rfinputselect.key(_this->gmId);
                 config.release(true);
             }
         }
@@ -488,18 +497,15 @@ private:
         SmGui::ForceSync();
         if (SmGui::Combo(CONCAT("##_pluto_iqmode_select_", _this->name), &_this->iqmodeId, _this->iqmodeselect.txt)) {
             if (_this->running) {
-                //iio_channel_attr_write(_this->rxChan, "gain_control_mode", _this->rfinputselect.value(_this->gmId).c_str());
+                // iio_channel_attr_write(_this->rxChan, \"gain_control_mode\", _this->rfinputselect.value(_this->gmId).c_str());
             }
             if (!_this->devDesc.empty()) {
                 config.acquire();
                 config.conf["devices"][_this->devDesc]["iqmode"] = _this->iqmodeselect.key(_this->iqmodeId);
-                
                 config.release(true);
             }
         }
-         if (_this->running) { SmGui::EndDisabled(); }
-        
-        
+        if (_this->running) { SmGui::EndDisabled(); }
     }
 
     void setBandwidth(int bw) {
@@ -514,12 +520,12 @@ private:
     static void worker(void* ctx) {
         PlutoSDRSourceModule* _this = (PlutoSDRSourceModule*)ctx;
         #define MAX_BUFFER_PLUTO 64000000/2
-        size_t buffersize= ((size_t)(_this->samplerate / 20.0f));
+        size_t buffersize = ((size_t)(_this->samplerate / 20.0f));
         size_t blockSize;
         size_t nbkernel;
         
-        blockSize=std::min<size_t>(STREAM_BUFFER_SIZE,buffersize);
-        nbkernel=std::min<int>(8, MAX_BUFFER_PLUTO/blockSize);
+        blockSize = std::min<size_t>(STREAM_BUFFER_SIZE, buffersize);
+        nbkernel = std::min<int>(8, MAX_BUFFER_PLUTO / blockSize);
         
         // Acquire channels
         iio_channel* rx0_i = iio_device_find_channel(_this->dev, "voltage0", 0);
@@ -530,13 +536,11 @@ private:
         }
 
         // Start streaming
-        if(_this->iqmodeId==0)
-        {
+        if (_this->iqmodeId == 0) {
             iio_channel_enable(rx0_i);
             iio_channel_enable(rx0_q);
         }
-        else
-        {
+        else {
             iio_channel_enable(rx0_i);
             iio_channel_disable(rx0_q);
         }
@@ -547,8 +551,8 @@ private:
         flog::info("PlutoSDRSourceModule '{0}': Allocate {1} kernel buffers", _this->name, nbkernel);
         flog::info("PlutoSDRSourceModule '{0}': Allocate buffer size {1}", _this->name, blockSize);
         iio_buffer* rxbuf = iio_device_create_buffer(_this->dev, blockSize, false);
-        // SetBUfferSize seems not working
-        //_this->stream.setBufferSize(blockSize); 
+        // SetBufferSize seems not working
+        // _this->stream.setBufferSize(blockSize); 
         if (!rxbuf) {
             flog::error("Could not create RX buffer");
             return;
@@ -556,47 +560,38 @@ private:
 
         uint32_t val = 0;
         iio_device_reg_read(_this->dev, 0x80000088, &val);
-        iio_device_reg_write(_this->dev, 0x80000088, val); //Reset underflow state
+        iio_device_reg_write(_this->dev, 0x80000088, val); // Reset underflow state
+        
         // Receive loop
         while (true) {
             // Read samples
-            ssize_t BufferRead= iio_buffer_refill(rxbuf) ;
+            ssize_t BufferRead = iio_buffer_refill(rxbuf);
             iio_device_reg_read(_this->dev, 0x80000088, &val);
-            if (val & 4)
-            {
+            if (val & 4) {
                 flog::warn("PlutoSDRSourceModule '{0}': Underflow!", _this->name);
-                
                 iio_device_reg_write(_this->dev, 0x80000088, val);
             }
-            if(_this->iqmodeId==0)
-            {   
+            if (_this->iqmodeId == 0) {   
                 int16_t* buf = (int16_t*)iio_buffer_start(rxbuf);
-                if (buf)
-                {
-                    volk_16i_s32f_convert_32f((float*)_this->stream.writeBuf, buf, 2048.0f,blockSize*2/* BufferRead/(2*sizeof(int16_t))*/);
-                     if (!_this->stream.swap(blockSize)) { break; };
+                if (buf) {
+                    volk_16i_s32f_convert_32f((float*)_this->stream.writeBuf, buf, 2048.0f, blockSize * 2 /* BufferRead/(2*sizeof(int16_t)) */);
+                    if (!_this->stream.swap(blockSize)) { break; }
                 }    
             }    
-            else
-            {
-               
+            else {
                 int8_t* buf = (int8_t*)iio_buffer_start(rxbuf);
-                if (buf)
-                {
-                    volk_8i_s32f_convert_32f((float*)_this->stream.writeBuf,  buf, 128.0f, blockSize*2);
-                     if (!_this->stream.swap(blockSize)) { break; };
+                if (buf) {
+                    volk_8i_s32f_convert_32f((float*)_this->stream.writeBuf, buf, 128.0f, blockSize * 2);
+                    if (!_this->stream.swap(blockSize)) { break; }
                 }    
-            }    
-
+            }
         }
 
         // Stop streaming
         iio_channel_disable(rx0_i);
         iio_channel_disable(rx0_q);
-        //flog::info("PlutoSDRSourceModule '{0}': iqmode: {1}!", _this->name, _this->iqmodeId);
         // Free buffer
         iio_buffer_destroy(rxbuf);
-        
     }   
 
     std::string name;
@@ -623,8 +618,8 @@ private:
     int srId = 0;
     int bwId = 0;
     int gmId = 0;
-    int rfId= 0;
-    int iqmodeId=0;
+    int rfId = 0;
+    int iqmodeId = 0;
 
     OptionList<std::string, std::string> devices;
     OptionList<int, double> samplerates;
