@@ -301,7 +301,10 @@ private:
         if (_this->running) { return; }
 
         // If no device is selected, give up
-        if (_this->devDesc.empty() || _this->uri.empty()) { return; }
+        if (_this->devDesc.empty() || _this->uri.empty()) {
+             uri = "ip:libresdr.local";
+             flog::error("set ip:libresdr.local");
+        }
 
         // Open context
         _this->ctx = iio_create_context_from_uri(_this->uri.c_str());
@@ -609,7 +612,7 @@ private:
     bool running = false;
 
     std::string devDesc = "";
-    std::string uri = "";
+    std::string uri = "ip:libresdr.local";
 
     double freq;
     int samplerate = 4000000;
